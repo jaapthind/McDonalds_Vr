@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Extreme Fast Food VR Simulator: The Golden Arches Edition</title>
+    <script src="https://aframe.io/releases/1.4.2/aframe.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/gh/c-frame/aframe-physics-system@v4.2.2/dist/aframe-physics-system.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/gh/c-frame/aframe-extras@7.0.0/dist/aframe-extras.min.js"></script>
+    <script src="https://unpkg.com/aframe-environment-component@1.3.3/dist/aframe-environment-component.min.js"></script>
+
+    <script>
+        // ==========================================
+        // SYSTEM CORE & STATE MANAGEMENT
+        // ==========================================
+        const GAME_CONFIG = {
+            shiftDuration: 28800, // 8 hours in game time
+            timeScale: 60, // 1 real second = 60 game seconds
+            maxStrikes: 3,
+            stations: {
+                FRY: { x: -3, y: 1, z: -2 },
+                GRILL: { x: -1, y: 1, z: -4 },
+                PREP: { x: 1, y: 1, z: -4 },
+                DRINK: { x: 3, y: 1, z: -2 },
+                REGISTER: { x: 0, y: 1, z: 2 }
+            },
+            menuItems: [
+                { id: 'burger_basic', name: 'Hamburger', components: ['bun_bottom', 'patty_cooked', 'bun_top'], price: 2.50 },
+                { id: 'burger_cheese', name: 'Cheeseburger', components: ['bun_bottom', 'patty_cooked', 'cheese', 'bun_top'], price: 3.00 },
+                { id: 'burger_mac', name: 'The Mac', components: ['bun_bottom', 'patty_cooked', 'bun_mid', 'patty_cooked', 'cheese', 'lettuce', 'sauce', 'bun_top'], price: 5.50 },
+                { id: 'fries_s', name: 'Small Fries', components: ['fries_cooked', 'box_small'], price: 1.50 },
+                { id: 'fries_m', name: 'Medium Fries', components: ['fries_cooked', 'box_medium'], price: 2.00 },
+                { id: 'fries_l', name: 'Large Fries', components: ['fries_cooked', 'box_large'], price: 2.50 },
+                { id: 'drink_cola', name: 'Cola Drink', components: ['cup', 'ice', 'cola_syrup', 'water'], price: 1.50 }
+            ],
+            aiNames: ["Bob", "Alice", "Jim", "Sarah", "Michael", "Dwight", "Pam", "Angela", "Stanley"]
+        };
+
+        AFRAME.registerSystem('restaurant-manager', {
+            schema: { score: { type: 'number', default: 0 }, strikes: { type: 'number', default: 0 } },
+            init: function() {
+                this.activeOrders = [];
+                this.clockTick = 0;
+                this.orderInterval = setInterval(() => this.generateOrder(), 15000);
+                this.timeLoop = setInterval(() => this.updateClock(), 1000 / (GAME_CONFIG.timeScale / 60));
+                console.log("[SYSTEM] Restaurant Manager Initialized. Awaiting orders.");
+            },
+            generateOrder: function() {
+                if(this.activeOrders.length >= 5) return; // Max screen limit
+                const numItems = Math.floor(Math.random() * 4) + 1;
+                const orderItems = [];
+                for(let i=0; i<numItems; i++) {
+                    orderItems.push(GAME_CONFIG.menuItems[Math.floor(Math.random() * GAME_CONFIG.menuItems.length)]);
+                }
+                const newOrder = {
+                    id: 'ORD-' + Math.floor(Math.random() * 9000 + 1000),
+                    items: orderItems,
+                    timePlaced: this.clockTick,
+                    status: 'PENDING',
+                    patience: 120 // Seconds before angry
+                };
+                this.activeOrders.push(newOrder);
+                this.updateOrderScreens();
+                this.el.emit('new-order', newOrder);
+            },
+            updateOrderScreens: function() {
+                const screen = document.getElementById('kds-screen');
+                if(!screen) return;
+                let uiText = "=== ACTIVE ORDERS ===\n\n";
+                this.activeOrders.forEach(o => {
+                    uiText += `[${o.id}] - ${o.items.map(i=>i.name).join(', ')}\n`;
+                });
+                screen.setAttribute('text', `value: ${uiText}; color: #0f0; wrapCount: 40; align: left`);
+            },
+            completeOrder: function(orderId) {
+                const index = this.activeOrders.findIndex(o => o.id === orderId);
+                if(index > -1) {
+                    this.data.score += this.activeOrders[index].items.reduce((acc, item) => acc + item.price, 0);
+                    this.activeOrders.splice(index, 1);
+                    this.updateOrderScreens();
+                    document.getElementById('score-display').setAttribute('text', `value: $${this.data.score.toFixed(2)}`);
+                    this.el.components.sound.playSound(); // Cha-ching
+                }
+            },
+            failOrder: function(orderId) {
+                this.data.strikes++;
+                if(this.data.strikes >= GAME_CONFIG.maxStrikes) this.triggerGameOver();
+            },
+            updateClock: function() {
+                this.clockTick++;
+                let hours = 8 + Math.floor(this.clockTick / 3600);
+                let minutes = Math.floor((this.clockTick % 3600) / 60);
+                let ampm = hours >= 12 ? 'PM' : 'AM';
+                if(hours > 12) hours -= 12;
+                document.getElementById('clock-display').setAttribute('text', `value: ${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')} ${ampm}`);
+            },
+            triggerGameOver: function() {
+                document.getElementById('game-over-screen').setAttribute('visible', 'true');
+                clearInterval(this.orderInterval);
+                clearInterval(this.timeLoop);
+            }
+        });
+
+        // ==========================================
+        // ADVANCED PHYSICS & INTERACTION
+        // ==========================================
+        AFRAME.registerComponent('complex-grab', {
+            schema: { snapDistance: { type: 'number', default: 0.2 } },
+            init: function () {
+                this.grabbed = false;
+                this.el.addEventListener('gripdown', this.onGrip.bind(this));
+                this.el.addEventListener('gripup', this.onRelease.bind(this));
+            },
+            onGrip: function () {
+                const colliders = this.el.components['aabb-collider']?.intersectedEls || [];
+                if (colliders.length === 0) return;
+                
+                // Find closest grabbable
+                let closest = null;
+                let minDist = Infinity;
+                colliders.forEach(c => {
+                    if(!c.classList.contains('grabbable')) return;
+                    let dist = this.el.object3D.position.distanceTo(c.object3D.position);
+                    if(dist < minDist) { minDist = dist; closest = c; }
+                });
+
+                if(!closest) return;
+                this.target = closest;
+                
+                // Physics constraint detachment
+                if (this.target.hasAttribute('dynamic-body')) {
+                    this.target.removeAttribute('dynamic-body');
+                }
+                
+                // Special handling for fry basket (hinge lock)
+                if(this.target.classList.contains('fry-basket')) {
+                    this.target.removeAttribute('constraint');
+                }
+
+                this.target.object3D.parent = this.el.object3D;
+                this.target.object3D.position.set(0, 0, 0);
+                this.target.object3D.rotation.set(0, 0, 0);
+                this.grabbed = true;
+                
+                // Emit event for state machines
+                this.target.emit('grabbed', { hand: this.el });
+            },
+            onRelease: function () {
+                if (!this.grabbed || !this.target) return;
+                
+                let worldPos = new THREE.Vector3();
+                let worldRot = new THREE.Quaternion();
+                this.target.object3D.getWorldPosition(worldPos);
+                this.target.object3D.getWorldQuaternion(worldRot);
+                
+                this.target.object3D.parent = this.el.sceneEl.object3D;
+                this.target.object3D.position.copy(worldPos);
+                this.target.object3D.quaternion.copy(worldRot);
+                
+                // Re-apply physics
+                this.target.setAttribute('dynamic-body', 'mass: 0.5; shape: box');
+                
+                // Check for snapping zones (e.g. grill, fryer, assembly board)
+                this.checkSnapZones();
+
+                this.target.emit('released', { hand: this.el });
+                this.grabbed = false;
+                this.target = null;
+            },
+            checkSnapZones: function() {
+                const zones = document.querySelectorAll('.snap-zone');
+                zones.forEach(zone => {
+                    let zonePos = new THREE.Vector3();
+                    zone.object3D.getWorldPosition(zonePos);
+                    let targetPos = new THREE.Vector3();
+                    this.target.object3D.getWorldPosition(targetPos);
+                    
+                    if(targetPos.distanceTo(zonePos) < this.data.snapDistance) {
+                        const typeAllowed = zone.getAttribute('data-accepts');
+                        if(this.target.classList.contains(typeAllowed)) {
+                            // Perform snap
+                            this.target.removeAttribute('dynamic-body');
+                            this.target.object3D.position.copy(zonePos);
+                            this.target.object3D.rotation.set(0,0,0);
+                            zone.emit('item-snapped', { item: this.target });
+                        }
+                    }
+                });
+            }
+        });
+
+        // ==========================================
+        // FRYER STATION LOGIC
+        // ==========================================
+        AFRAME.registerComponent('fryer-logic', {
+            schema: { 
+                oilTemp: { type: 'number', default: 350 },
+                cookTime: { type: 'number', default: 18000 }, // 18 seconds real time
+                burnTime: { type: 'number', default: 25000 }
+            },
+            init: function() {
+                this.baskets = [];
+                this.el.addEventListener('item-snapped', this.onBasketSubmerged.bind(this));
+                
+                // Sizzle Audio Setup
+                this.sizzleAudio = new Audio('data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA='); // Dummy audio base64
+                this.sizzleAudio.loop = true;
+            },
+            onBasketSubmerged: function(evt) {
+                const basket = evt.detail.item;
+                if(basket.getAttribute('data-state') === 'empty') return;
+                
+                basket.setAttribute('data-state', 'cooking');
+                this.sizzleAudio.play();
+                
+                // Particle effects for bubbles
+                const bubbles = document.createElement('a-entity');
+                bubbles.setAttribute('particle-system', 'color: #FFF,#E6C200; size: 0.1, 0; velocityValue: 0 1 0; particleCount: 50');
+                bubbles.setAttribute('position', basket.getAttribute('position'));
+                this.el.appendChild(bubbles);
+
+                // Timers
+                let timer = 0;
+                let cookInterval = setInterval(() => {
+                    if(basket.object3D.parent !== this.el.sceneEl.object3D) {
+                        // Basket was pulled out
+                        clearInterval(cookInterval);
+                        this.sizzleAudio.pause();
+                        this.el.removeChild(bubbles);
+                        return;
+                    }
+                    
+                    timer += 1000;
+                    if(timer === this.data.cookTime) {
+                        basket.setAttribute('data-state', 'cooked');
+                        basket.querySelector('.fries-mesh').setAttribute('material', 'color: #FFD700'); // Golden
+                        this.el.sceneEl.components.sound.playSound(); // Fryer beep
+                    } else if (timer >= this.data.burnTime) {
+                        basket.setAttribute('data-state', 'burnt');
+                        basket.querySelector('.fries-mesh').setAttribute('material', 'color: #4A2E00'); // Burnt
+                    }
+                }, 1000);
+            }
+        });
+
+        // ==========================================
+        // GRILL STATION LOGIC
+        // ==========================================
+        AFRAME.registerComponent('grill-logic', {
+            schema: { temp: { type: 'number', default: 400 } },
+            init: function() {
+                this.pattiesOnGrill = [];
+                this.el.addEventListener('collide', this.onPattyPlaced.bind(this));
+            },
+            onPattyPlaced: function(evt) {
+                const item = evt.detail.body.el;
+                if(!item.classList.contains('patty') || item.hasAttribute('data-grilling')) return;
+                
+                item.setAttribute('data-grilling', 'true');
+                item.removeAttribute('dynamic-body'); // Lock to grill
+                
+                // Smoke effect
+                let smoke = document.createElement('a-entity');
+                smoke.setAttribute('particle-system', 'color: #555,#FFF; size: 0.5, 0; velocityValue: 0 2 0; opacity: 0.3; particleCount: 30');
+                item.appendChild(smoke);
+
+                let cookProgress = 0;
+                let grillInterval = setInterval(() => {
+                    cookProgress += 10;
+                    if(cookProgress === 100) {
+                        item.setAttribute('material', 'color: #5C3A21'); // Cooked brown
+                        item.setAttribute('data-state', 'cooked');
+                    } else if (cookProgress > 150) {
+                        item.setAttribute('material', 'color: #111111'); // Burnt char
+                        item.setAttribute('data-state', 'burnt');
+                        clearInterval(grillInterval);
+                    }
+                }, 1000);
+
+                // Allow Spatula Interaction
+                item.addEventListener('spatula-flip', () => {
+                    item.setAttribute('rotation', '180 0 0');
+                    item.setAttribute('data-flipped', 'true');
+                });
+            }
+        });
+
+        // ==========================================
+        // AI WORKER (CO-WORKERS)
+        // ==========================================
+        AFRAME.registerComponent('ai-worker-logic', {
+            schema: { role: { type: 'string', default: 'frier' }, speed: { type: 'number', default: 1.5 } },
+            init: function() {
+                this.state = 'IDLE';
+                this.targetPos = new THREE.Vector3();
+                this.navAgent = this.el.components['nav-agent'];
+                this.assignName();
+                this.aiLoop = setInterval(() => this.decideAction(), 3000);
+            },
+            assignName: function() {
+                this.name = GAME_CONFIG.aiNames[Math.floor(Math.random() * GAME_CONFIG.aiNames.length)];
+                let nametag = document.createElement('a-entity');
+                nametag.setAttribute('text', `value: ${this.name}\n(${this.data.role}); align: center; color: white; width: 2`);
+                nametag.setAttribute('position', '0 2.2 0');
+                nametag.setAttribute('look-at', '#player-camera');
+                this.el.appendChild(nametag);
+            },
+            decideAction: function() {
+                // Extremely complex AI state machine simulation
+                switch(this.state) {
+                    case 'IDLE':
+                        if(Math.random() > 0.5) this.patrol();
+                        break;
+                    case 'PATROLLING':
+                        if(this.navAgent.distanceToTarget < 0.5) this.state = 'IDLE';
+                        break;
+                    case 'WORKING':
+                        // Play animation, interact with station
+                        this.el.setAttribute('animation-mixer', 'clip: Working; loop: once');
+                        setTimeout(() => { this.state = 'IDLE'; }, 5000);
+                        break;
+                }
+            },
+            patrol: function() {
+                const rx = (Math.random() - 0.5) * 8;
+                const rz = (Math.random() - 0.5) * 8;
+                this.el.setAttribute('nav-agent', { destination: `${rx} 0 ${rz}` });
+                this.state = 'PATROLLING';
+            }
+        });
+
+        // ==========================================
+        // INGREDIENT SPAWNERS & ASSEMBLY
+        // ==========================================
+        AFRAME.registerComponent('spawner', {
+            schema: { itemToSpawn: { type: 'string' }, cooldown: { type: 'number', default: 1000 } },
+            init: function() {
+                this.canSpawn = true;
+                this.el.addEventListener('click', this.spawn.bind(this));
+                this.el.addEventListener('collide', (e) => { if(e.detail.body.el.id === 'right-hand' || e.detail.body.el.id === 'left-hand') this.spawn(); });
+            },
+            spawn: function() {
+                if(!this.canSpawn) return;
+                this.canSpawn = false;
+                
+                const item = document.createElement('a-entity');
+                item.setAttribute('mixin', this.data.itemToSpawn);
+                
+                let pos = new THREE.Vector3();
+                this.el.object3D.getWorldPosition(pos);
+                pos.y += 0.5; // Spawn above the dispenser
+                item.setAttribute('position', pos);
+                
+                this.el.sceneEl.appendChild(item);
+                setTimeout(() => { this.canSpawn = true; }, this.data.cooldown);
+            }
+        });
+
+        // Custom Shaders for realism (Oil, Soda)
+        AFRAME.registerComponent('fluid-shader', {
+            init: function () {
+                const vs = `varying vec2 vUv; uniform float time; void main() { vUv = uv; vec3 pos = position; pos.y += sin(pos.x * 10.0 + time) * 0.02; gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0); }`;
+                const fs = `varying vec2 vUv; uniform float time; uniform vec3 color; void main() { float mixVal = (sin(vUv.x * 20.0 + time) + cos(vUv.y * 20.0 + time)) * 0.5 + 0.5; gl_FragColor = vec4(mix(color, vec3(1.0, 1.0, 1.0), mixVal * 0.2), 0.85); }`;
+                this.mat = new THREE.ShaderMaterial({
+                    uniforms: { time: { value: 0.0 }, color: { value: new THREE.Color(this.el.getAttribute('data-color') || '#D4AF37') } },
+                    vertexShader: vs, fragmentShader: fs, transparent: true
+                });
+                this.el.getObject3D('mesh').material = this.mat;
+            },
+            tick: function (t) { this.mat.uniforms.time.value = t / 1000; }
+        });
+
+    </script>
+</head>
+<body>
+    <a-scene physics="debug: false; gravity: -9.8" restaurant-manager renderer="antialias: true; physicallyCorrectLights: true; colorManagement: true;" sound="src: url(data:audio/mp3;base64,...); loop: true; volume: 0.2">
+        
+        <a-assets timeout="10000">
+            <img id="tile-floor" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVQIW2NkYGD4z8DAwMgAI0AMDA4BGb6z0TAAAAAASUVORK5CYII=">
+            <img id="stainless-steel" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFElEQVQIW2M8fPjwfwYGBgYGJAAZAO5qBgY/J+B2AAAAAElFTkSuQmCC">
+            
+            <a-mixin id="grab" dynamic-body="mass: 0.5; linearDamping: 0.01; angularDamping: 0.01" class="grabbable" shadow="cast: true"></a-mixin>
+            <a-mixin id="patty_raw" mixin="grab" geometry="primitive: cylinder; radius: 0.15; height: 0.03" material="color: #993300" class="patty" data-state="raw"></a-mixin>
+            <a-mixin id="bun_top" mixin="grab" geometry="primitive: sphere; radius: 0.15; thetaLength: 90" material="color: #E2AC5D"></a-mixin>
+            <a-mixin id="bun_bot" mixin="grab" geometry="primitive: cylinder; radius: 0.15; height: 0.04" material="color: #E2AC5D"></a-mixin>
+            <a-mixin id="cheese" mixin="grab" geometry="primitive: box; width: 0.2; height: 0.01; depth: 0.2" material="color: #FFCC00"></a-mixin>
+            <a-mixin id="lettuce" mixin="grab" geometry="primitive: cylinder; radius: 0.14; height: 0.02" material="color: #33CC33; roughness: 0.8"></a-mixin>
+            
+            <a-mixin id="fry_basket" mixin="grab" geometry="primitive: box; width: 0.15; height: 0.15; depth: 0.3" material="color: #888; wireframe: true" class="fry-basket" data-state="empty"></a-mixin>
+            <a-mixin id="spatula" mixin="grab" geometry="primitive: box; width: 0.1; height: 0.01; depth: 0.3" material="color: #CCC"></a-mixin>
+            <a-mixin id="cup_empty" mixin="grab" geometry="primitive: cylinder; radiusBottom: 0.08; radiusTop: 0.1; height: 0.25; openEnded: true" material="color: #FFF; side: double"></a-mixin>
+        </a-assets>
+
+        <a-entity id="player-rig" movement-controls="constrainToNavMesh: true; speed: 0.2" position="0 0 0">
+            <a-entity id="player-camera" camera position="0 1.6 0" look-controls="pointerLockEnabled: false">
+                <a-cursor raycaster="objects: .interactable, .ui-btn; far: 3" color="#00FF00" scale="0.5 0.5 0.5"></a-cursor>
+                <a-entity id="hud" position="0 0 -0.5">
+                    <a-text id="clock-display" value="08:00 AM" position="-0.4 0.3 0" scale="0.15 0.15 0.15" color="#FFF"></a-text>
+                    <a-text id="score-display" value="$0.00" position="0.3 0.3 0" scale="0.15 0.15 0.15" color="#0F0"></a-text>
+                </a-entity>
+            </a-entity>
+            <a-entity id="left-hand" hand-controls="hand: left" sphere-collider="objects: .grabbable; radius: 0.05" complex-grab></a-entity>
+            <a-entity id="right-hand" hand-controls="hand: right" sphere-collider="objects: .grabbable; radius: 0.05" complex-grab></a-entity>
+        </a-entity>
+
+        <a-entity id="navmesh" geometry="primitive: plane; width: 20; height: 20" material="visible: false" rotation="-90 0 0" nav-mesh></a-entity>
+
+        <a-plane position="0 0 0" rotation="-90 0 0" width="20" height="20" material="src: #tile-floor; repeat: 40 40; roughness: 0.2" static-body></a-plane>
+        <a-box position="0 2 -6" width="20" height="4" depth="0.2" material="color: #EBEBEB" static-body></a-box> <a-box position="-6 2 0" width="0.2" height="4" depth="20" material="color: #DA291C" static-body></a-box> <a-box position="6 2 0" width="0.2" height="4" depth="20" material="color: #DA291C" static-body></a-box> <a-plane position="0 4 0" rotation="90 0 0" width="20" height="20" material="color: #FAFAFA; roughness: 1"></a-plane> <a-light type="ambient" color="#FFF" intensity="0.6"></a-light>
+        <a-entity light="type: point; intensity: 0.5; distance: 15; castShadow: true" position="-3 3.8 -2"></a-entity>
+        <a-entity light="type: point; intensity: 0.5; distance: 15; castShadow: true" position="3 3.8 -2"></a-entity>
+        <a-entity light="type: point; intensity: 0.5; distance: 15; castShadow: true" position="0 3.8 2"></a-entity>
+
+        <a-entity id="station-fry" position="-3 0 -3">
+            <a-box position="0 0.5 0" width="1.5" height="1" depth="1" material="src: #stainless-steel; metalness: 0.8; roughness: 0.2" static-body></a-box>
+            <a-box position="0 1.2 -0.4" width="1.5" height="0.4" depth="0.1" rotation="-30 0 0" material="color: #222" static-body>
+                <a-text value="OIL TEMP: 350F\nSTATUS: READY" position="-0.6 0 0.06" scale="0.3 0.3 0.3" color="#F00"></a-text>
+                <a-circle position="0.5 0 0.06" radius="0.05" material="color: #0F0"></a-circle>
+            </a-box>
+            <a-entity position="-0.4 1 0.1">
+                <a-box width="0.3" height="0.4" depth="0.6" material="color: #111" position="0 -0.2 0" static-body></a-box>
+                <a-plane width="0.28" height="0.58" rotation="-90 0 0" data-color="#D4AF37" fluid-shader class="snap-zone" data-accepts="fry-basket" fryer-logic></a-plane>
+            </a-entity>
+            <a-entity position="0.4 1 0.1">
+                <a-box width="0.3" height="0.4" depth="0.6" material="color: #111" position="0 -0.2 0" static-body></a-box>
+                <a-plane width="0.28" height="0.58" rotation="-90 0 0" data-color="#D4AF37" fluid-shader class="snap-zone" data-accepts="fry-basket" fryer-logic></a-plane>
+            </a-entity>
+
+            <a-entity position="0 2 0.5">
+                <a-cone radius-bottom="0.2" radius-top="0.6" height="0.8" rotation="180 0 0" material="src: #stainless-steel; metalness: 0.8" static-body></a-cone>
+                <a-box position="0 -0.5 0" width="0.2" height="0.2" depth="0.2" material="color: #F00" class="interactable ui-btn" spawner="itemToSpawn: raw_fries; cooldown: 2000"></a-box>
+                <a-text value="PUSH FOR FRIES" position="0 -0.7 0" align="center" scale="0.4 0.4 0.4"></a-text>
+            </a-entity>
+
+            <a-entity mixin="fry_basket" position="-0.4 1.1 0.5"></a-entity>
+            <a-entity mixin="fry_basket" position="0.4 1.1 0.5"></a-entity>
+        </a-entity>
+
+        <a-entity id="station-grill" position="0 0 -4">
+            <a-box position="0 0.5 0" width="3" height="1" depth="1.2" material="src: #stainless-steel; metalness: 0.8; roughness: 0.2" static-body></a-box>
+            <a-box position="0 1.01 -0.1" width="2.8" height="0.02" depth="0.8" material="color: #1a1a1a; metalness: 0.9; roughness: 0.5" static-body grill-logic></a-box>
+            <a-box position="0 1.01 0.4" width="2.8" height="0.01" depth="0.1" material="color: #000" static-body></a-box>
+            <a-box position="0 3 0" width="3.2" height="0.5" depth="1.5" material="src: #stainless-steel; metalness: 0.8" static-body></a-box>
+            <a-entity position="0 2.5 0" particle-system="color: #AAA; size: 1; velocityValue: 0 1 0; particleCount: 20; opacity: 0.1"></a-entity>
+
+            <a-entity mixin="spatula" position="1.2 1.02 0.3"></a-entity>
+            <a-entity mixin="spatula" position="-1.2 1.02 0.3"></a-entity>
+        </a-entity>
+
+        <a-entity id="station-prep" position="3 0 -4">
+            <a-box position="0 0.5 0" width="2" height="1" depth="1" material="src: #stainless-steel" static-body></a-box>
+            <a-box position="-0.5 1.5 0" width="0.8" height="1" depth="0.8" material="color: #E0E0E0" static-body>
+                <a-box position="0 0 0.41" width="0.7" height="0.9" depth="0.02" material="color: #B0E0E6; opacity: 0.5; transparent: true"></a-box>
+                <a-circle position="0 -0.3 0.42" radius="0.1" material="color: #DA291C" class="interactable ui-btn" spawner="itemToSpawn: patty_raw; cooldown: 500"></a-circle>
+                <a-text value="RAW BEEF" position="0 0.4 0.42" color="#000" align="center" scale="0.4 0.4 0.4"></a-text>
+            </a-box>
+            <a-box position="0.5 1.2 0" width="0.8" height="0.4" depth="0.8" material="color: #8B4513" static-body>
+                <a-circle position="-0.2 0 0.41" radius="0.05" material="color: #FFF" class="interactable ui-btn" spawner="itemToSpawn: bun_top; cooldown: 200"></a-circle>
+                <a-circle position="0.2 0 0.41" radius="0.05" material="color: #FFF" class="interactable ui-btn" spawner="itemToSpawn: bun_bot; cooldown: 200"></a-circle>
+            </a-box>
+            <a-box position="0.5 1.01 0.2" width="0.3" height="0.1" depth="0.3" material="color: #333">
+                <a-circle position="0 0.06 0" rotation="-90 0 0" radius="0.1" material="color: #FFCC00" class="interactable ui-btn" spawner="itemToSpawn: cheese; cooldown: 200"></a-circle>
+            </a-box>
+            <a-box position="0.5 1.01 -0.2" width="0.3" height="0.1" depth="0.3" material="color: #333">
+                <a-circle position="0 0.06 0" rotation="-90 0 0" radius="0.1" material="color: #33CC33" class="interactable ui-btn" spawner="itemToSpawn: lettuce; cooldown: 200"></a-circle>
+            </a-box>
+        </a-entity>
+
+        <a-entity id="station-assembly" position="0 0 -2.5">
+            <a-box position="0 0.4 0" width="4" height="0.8" depth="0.8" material="src: #stainless-steel" static-body></a-box>
+            <a-plane position="0 0.81 0" rotation="-90 0 0" width="3.8" height="0.6" material="color: #FFF; roughness: 0.9" static-body class="snap-zone" data-accepts="bun_bot"></a-plane>
+            
+            <a-box position="0 2 0" width="3" height="1" depth="0.1" material="color: #111" static-body>
+                <a-entity id="kds-screen" position="-1.4 0.4 0.06" text="value: NO ORDERS; color: #0f0; width: 2.8; align: left; baseline: top"></a-entity>
+            </a-box>
+        </a-entity>
+
+        <a-entity id="station-counter" position="0 0 2">
+            <a-box position="0 0.5 0" width="8" height="1" depth="1" material="color: #DA291C; metalness: 0.3; roughness: 0.5" static-body></a-box>
+            <a-box position="0 1 0" width="8.2" height="0.05" depth="1.2" material="color: #FFF; roughness: 0.1" static-body></a-box>
+            
+            <a-entity position="-2 1.05 -0.2">
+                <a-box width="0.4" height="0.1" depth="0.4" material="color: #333" static-body></a-box> <a-box position="0 0.3 0.1" width="0.5" height="0.4" depth="0.05" rotation="-20 0 0" material="color: #222" static-body> <a-plane position="0 0 0.03" width="0.45" height="0.35" material="color: #1E90FF"></a-plane>
+                    <a-box position="-0.15 0.1 0.04" width="0.1" height="0.05" depth="0.01" material="color: #FFF" class="interactable ui-btn"></a-box>
+                    <a-box position="0 0.1 0.04" width="0.1" height="0.05" depth="0.01" material="color: #FFF" class="interactable ui-btn"></a-box>
+                    <a-box position="0.15 0.1 0.04" width="0.1" height="0.05" depth="0.01" material="color: #FFF" class="interactable ui-btn"></a-box>
+                </a-box>
+            </a-entity>
+
+            <a-entity position="2 1.05 -0.2">
+                <a-box width="0.4" height="0.1" depth="0.4" material="color: #333" static-body></a-box>
+                <a-box position="0 0.3 0.1" width="0.5" height="0.4" depth="0.05" rotation="-20 0 0" material="color: #222" static-body>
+                    <a-plane position="0 0 0.03" width="0.45" height="0.35" material="color: #1E90FF"></a-plane>
+                </a-box>
+            </a-entity>
+
+            <a-box position="0 1.05 0" width="1.5" height="0.1" depth="0.8" material="color: #FFCC00; transparent: true; opacity: 0.3" class="snap-zone" data-accepts="bag">
+                <a-text value="PLACE COMPLETED ORDER HERE" position="0 0.5 0" rotation="-90 0 0" align="center" color="#000" scale="0.5 0.5 0.5"></a-text>
+            </a-box>
+        </a-entity>
+
+        <a-entity id="station-beverage" position="4 0 0" rotation="0 -90 0">
+            <a-box position="0 0.5 0" width="2" height="1" depth="1" material="src: #stainless-steel" static-body></a-box>
+            <a-box position="0 1.4 -0.2" width="1.5" height="0.8" depth="0.4" material="color: #C0C0C0" static-body>
+                <a-box position="-0.5 0 0.25" width="0.2" height="0.4" depth="0.2" material="color: #222">
+                    <a-cylinder position="0 -0.2 0" radius="0.02" height="0.1" material="color: #silver"></a-cylinder>
+                </a-box>
+                <a-box position="0 0 0.25" width="0.2" height="0.4" depth="0.2" material="color: #222">
+                    <a-cylinder position="0 -0.2 0" radius="0.02" height="0.1" material="color: #silver"></a-cylinder>
+                    <a-plane position="0 0.1 0.11" width="0.15" height="0.15" material="color: #DA291C"></a-plane> </a-box>
+                <a-box position="0.5 0 0.25" width="0.2" height="0.4" depth="0.2" material="color: #222">
+                    <a-cylinder position="0 -0.2 0" radius="0.02" height="0.1" material="color: #silver"></a-cylinder>
+                    <a-plane position="0 0.1 0.11" width="0.15" height="0.15" material="color: #008B00"></a-plane> </a-box>
+            </a-box>
+            <a-plane position="0 1.01 0.1" rotation="-90 0 0" width="1.5" height="0.4" material="color: #000; wireframe: true" static-body></a-plane>
+            
+            <a-cylinder position="-0.8 1.2 0.3" radius="0.12" height="0.4" material="color: #FAFAFA; opacity: 0.5; transparent: true">
+                <a-circle position="0 0.21 0" rotation="-90 0 0" radius="0.1" material="color: #DA291C" class="interactable ui-btn" spawner="itemToSpawn: cup_empty"></a-circle>
+            </a-cylinder>
+        </a-entity>
+
+        <a-entity id="npc-1" position="-2 0 -2" ai-worker-logic="role: Frier" static-body="shape: cylinder; cylinderAxis: y">
+            <a-cylinder position="0 0.8 0" radius="0.3" height="1.6" material="color: #1E90FF"></a-cylinder> <a-sphere position="0 1.8 0" radius="0.25" material="color: #FFDCB1"></a-sphere> <a-box position="0 2.05 0" width="0.4" height="0.1" depth="0.4" material="color: #DA291C"></a-box> </a-entity>
+        
+        <a-entity id="npc-2" position="2 0 -2" ai-worker-logic="role: Grill Master" static-body="shape: cylinder; cylinderAxis: y">
+            <a-cylinder position="0 0.8 0" radius="0.3" height="1.6" material="color: #1E90FF"></a-cylinder>
+            <a-sphere position="0 1.8 0" radius="0.25" material="color: #8D5524"></a-sphere>
+            <a-box position="0 2.05 0" width="0.4" height="0.1" depth="0.4" material="color: #DA291C"></a-box>
+        </a-entity>
+
+        <a-entity id="game-over-screen" visible="false" position="0 1.6 -1" rotation="0 0 0" camera-transform-attached>
+            <a-plane width="3" height="2" material="color: #000; opacity: 0.9">
+                <a-text value="YOU'RE FIRED!" position="0 0.5 0.01" align="center" color="#F00" scale="2 2 2"></a-text>
+                <a-text value="Too many complaints. Turn in your apron." position="0 0 0.01" align="center" color="#FFF"></a-text>
+                <a-box position="0 -0.5 0.01" width="1" height="0.3" material="color: #DA291C" class="interactable" onclick="location.reload()">
+                    <a-text value="RESTART SHIFT" position="0 0 0.01" align="center" color="#FFF"></a-text>
+                </a-box>
+            </a-plane>
+        </a-entity>
+
+    </a-scene>
+</body>
+</html>
